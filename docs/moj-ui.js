@@ -282,7 +282,7 @@ function mapSummary(rec) {
   const ts = [rec.transforms.all, ...Object.values(rec.transforms.sheets || {})].filter(Boolean);
   const aligned = ts.filter(t => t.pairs && t.pairs.length);
   const a = rec.transforms.all;
-  if (!aligned.length && a && a.method === 'auto') return `<span class="mojbadge ${a.auto.confidence === 'low' ? 'arb' : 'ok'}">自動推定・信頼度${CONF[a.auto.confidence]}（一致率${Math.round(a.auto.inlier * 100)}%）</span>`;
+  if (!aligned.length && a && a.method === 'auto') return `<span class="mojbadge ${a.auto.confidence === 'low' ? 'arb' : 'ok'}">自動推定・図郭 高${a.auto.sheetsHigh ?? 0}・中${a.auto.sheetsMid ?? 0}・低${a.auto.sheetsLow ?? 0}</span>`;
   if (!aligned.length) return '<span class="mojbadge arb">任意座標・仮配置</span>';
   return `<span class="mojbadge ok">任意座標・位置合わせ済${Object.keys(rec.transforms.sheets || {}).length ? '（図郭別あり）' : ''}</span>`;
 }
@@ -578,9 +578,9 @@ async function runAuto(rec) {
   const query = (pref + (rec.city || '') + oaza.replace(/（.*?）/g, '')).trim();
   const fb = rec.transforms.all ? rec.transforms.all.center : null;
   const res = await ask({
-    type: 'auto', query, fallback: fb, radius: 2000,
+    type: 'auto', query, fallback: fb, radius: 2600,
     parcels: rec.parcels.map(p => ({ ring: p.ring, chiban: p.chiban, sheet: p.sheet })),
-    bbox: rec.bbox, sheets: rec.sheets.map(s => ({ no: s.no })),
+    bbox: rec.bbox, sheets: rec.sheets.map(s => ({ no: s.no, corners: s.corners })),
   });
   if (active && active.rec === rec) closeAlign();
   rec.transforms.all = res.main;
@@ -595,7 +595,7 @@ async function runAuto(rec) {
 }
 function autoSummary(rec, res) {
   const a = res.main.auto;
-  return `${rec.name}：信頼度${CONF[a.confidence]}・一致率${Math.round(a.inlier * 100)}%・図郭別調整${Object.keys(res.sheets).length}枚`;
+  return `${rec.name}：図郭${a.sheetsTotal}枚のうち 信頼度高${a.sheetsHigh}・中${a.sheetsMid}・低${a.sheetsLow}（低は隣の図郭から予想した仮の位置）`;
 }
 $('mojauto').onclick = async () => {
   if (!active) return;

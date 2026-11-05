@@ -1,4 +1,5 @@
 // 地図XMLの読み込みを画面の裏側で行うWorker。
+import { arbToLatLng } from './moj.js';
 import { listZip, extractZip, decodeText, innerXml, innerHead, headInfo, parseSearchList, parseMojXml } from './moj.js';
 
 import { featureEdges, edgePoints, decodeMvt, tileRange, searchAlignment, refineSheet, toTransform, linesToLocal } from './moj-auto.js';
@@ -60,42 +61,73 @@ async function autoAlign(data, id) {
   let prior = query ? await findPrior(query) : null;
   if (!prior && fallback) prior = { lat: fallback[0], lon: fallback[1], title: '仮配置の位置' };
   if (!prior) throw new Error('探す範囲の目安（大字の位置）が分かりませんでした');
-  const anchor = [(bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2];
   const edges = featureEdges(parcels);
-  const pts = edgePoints(edges, anchor, 4);
-  if (pts.length / 2 < 200) throw new Error('照合に使える境界線（道路・水路に面した辺）が少なすぎます');
-  let S = 0; for (let i = 0; i < pts.length; i += 2) S = Math.max(S, Math.hypot(pts[i], pts[i + 1]));
-  const R = radius || 2000;
+  const mapAnchor = [(bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2];
+  const allPts = edgePoints(edges, mapAnchor, 4);
+  if (allPts.length / 2 < 200) throw new Error('照合に使える境界線（道路・水路に面した辺）が少なすぎます');
+  let S = 0; for (let i = 0; i < allPts.length; i += 2) S = Math.max(S, Math.hypot(allPts[i], allPts[i + 1]));
+  const R = radius || 2600;
   say(`「${prior.title}」付近の道路・水路データを取得中…`);
-  const got = await fetchLines(prior.lat, prior.lon, S * 1.05 + R + 150, (d, n) => { if (d % 10 === 0 || d === n) say(`道路・水路データを取得中… ${d}/${n}`); });
+  const got = await fetchLines(prior.lat, prior.lon, Math.max(S, 800) + R + 300, (d, n) => { if (d % 10 === 0 || d === n) say(`道路・水路データを取得中… ${d}/${n}`); });
   if (!got.lines.length) throw new Error('国土地理院のデータを取得できませんでした');
-  const local = linesToLocal(got.lines, prior.lat, prior.lon);
-  say('位置を探索中…');
-  const res = searchAlignment(pts, local, { radius: R, progress: f => say(`位置を探索中… ${Math.round(f * 100)}%`) });
-  const b = res.best;
-  const main = { ...toTransform(b, anchor, prior.lat, prior.lon), method: 'auto', pairs: [], rms: null,
-    auto: { confidence: res.confidence, inlier: +b.inlier.toFixed(3), ratio: +res.ratio.toFixed(2), contrast: +b.contrast.toFixed(3), rmsInlier: b.rmsInlier != null ? +b.rmsInlier.toFixed(2) : null, prior: prior.title, tiles: got.tiles, failedTiles: got.failed, lastErr: got.lastErr || undefined, lines: got.lines.length } };
-  // 図郭ごとの微調整
-  const sheetT = {};
-  if (res.confidence !== 'low') {
-    say('図郭ごとに微調整中…');
-    for (const sh of sheets) {
-      const sp = edgePoints(edges, anchor, 3, sh.no);
-      if (sp.length / 2 < 150) continue;
-      const before = res.fine.stats(sp, b, 3).inlier;
-      const r = refineSheet(res.fine, sp, b);
-      if (r && r.inlier >= 0.3 && r.inlier > before + 0.03) {
-        sheetT[sh.no] = { ...toTransform(r, anchor, prior.lat, prior.lon), method: 'auto', pairs: [], rms: null,
-          auto: { confidence: r.inlier >= 0.45 ? 'high' : 'mid', inlier: +r.inlier.toFixed(3), before: +before.toFixed(3), rmsInlier: r.rmsInlier != null ? +r.rmsInlier.toFixed(2) : null, sheet: true } };
-      }
+
+  // 図郭ごとに探す。見つかった図郭の隣は、その結果から予想した位置の近くだけを探す（速く・確実に）
+  const info = sheets.map(sh => {
+    const c = sh.corners && sh.corners.length ? [sh.corners.reduce((a, q) => a + q[0], 0) / sh.corners.length, sh.corners.reduce((a, q) => a + q[1], 0) / sh.corners.length] : null;
+    const pts = c ? edgePoints(edges, c, 3, sh.no) : new Float64Array();
+    return { no: sh.no, anchor: c, pts, n: pts.length / 2 };
+  }).filter(x => x.anchor && x.n >= 120);
+  const solved = new Map();
+  const near = (a, b) => Math.hypot(a.anchor[0] - b.anchor[0], a.anchor[1] - b.anchor[1]);
+  const todo = info.slice().sort((a, b) => b.n - a.n);
+  let wideTries = 0, k = 0;
+  const priorLocal = linesToLocal(got.lines, prior.lat, prior.lon);
+  while (todo.length) {
+    // 解けた図郭に一番近い図郭を優先
+    let idx = 0, bestD = Infinity, ref = null;
+    for (let i = 0; i < todo.length; i++) for (const [no, r] of solved) {
+      if (r.conf === 'low') continue;
+      const d = near(todo[i], r.sheet);
+      if (d < bestD) { bestD = d; idx = i; ref = r; }
     }
+    const sh = todo.splice(ref ? idx : 0, 1)[0];
+    k++;
+    say(`図郭ごとに位置を探索中… ${k}/${info.length}（図郭${sh.no}）`);
+    let res, lat0, lon0;
+    if (ref && bestD < 900) {
+      // 隣の結果から予想した位置の近くだけ
+      const [plat, plon] = arbToLatLng(sh.anchor[0], sh.anchor[1], ref.T);
+      lat0 = plat; lon0 = plon;
+      const a0 = ref.T.angle;
+      res = searchAlignment(sh.pts, linesToLocal(got.lines, lat0, lon0), { radius: 220, fftSize: 256, minCell: 4, angles: [-3, -1.5, 0, 1.5, 3].map(d => a0 + d), scales: [ref.T.scale * 0.98, ref.T.scale, ref.T.scale * 1.02] });
+    } else {
+      if (wideTries >= 6 && solved.size === 0) break; // 広く探しても見つからない図面
+      wideTries++;
+      lat0 = prior.lat; lon0 = prior.lon;
+      res = searchAlignment(sh.pts, priorLocal, { radius: R, minCell: 6, angles: [-6, -4, -2, 0, 2, 4, 6], scales: [0.97, 1, 1.03] });
+    }
+    const b = res.best;
+    const T = { ...toTransform(b, sh.anchor, lat0, lon0), method: 'auto', pairs: [], rms: null,
+      auto: { confidence: res.confidence, inlier: +b.inlier.toFixed(3), contrast: +b.contrast.toFixed(3), ratio: +res.ratio.toFixed(2), rmsInlier: b.rmsInlier != null ? +b.rmsInlier.toFixed(2) : null, sheet: true, local: !!ref } };
+    solved.set(sh.no, { T, conf: res.confidence, sheet: sh });
   }
-  post('auto', { id, main, sheets: sheetT, candidates: res.candidates.slice(0, 4).map(c => ({ score: c.score, inlier: c.inlier, ...toTransform(c, anchor, prior.lat, prior.lon) })) });
+  // 解けなかった図郭は、一番近い「高・中」の図郭の結果から予想（信頼度：低）
+  const good = [...solved.values()].filter(r => r.conf !== 'low');
+  const sheetT = {};
+  for (const r of solved.values()) {
+    if (r.conf !== 'low' || !good.length) { sheetT[r.sheet.no] = r.T; continue; }
+    const g = good.reduce((m, x) => near(x.sheet, r.sheet) < near(m.sheet, r.sheet) ? x : m);
+    sheetT[r.sheet.no] = { ...g.T, auto: { ...g.T.auto, confidence: 'low', inherited: g.sheet.no, sheet: true } };
+  }
+  const best = good.sort((a, b) => b.T.auto.contrast - a.T.auto.contrast)[0];
+  const cnt = { high: 0, mid: 0, low: 0 };
+  for (const t of Object.values(sheetT)) cnt[t.auto.confidence]++;
+  const conf = !best ? 'low' : cnt.high >= Math.max(2, info.length * 0.4) ? 'high' : cnt.high + cnt.mid >= Math.max(2, info.length * 0.3) ? 'mid' : 'low';
+  const base = best ? best.T : { center: [prior.lat, prior.lon], angle: 0, scale: 1, anchor: mapAnchor };
+  const main = { ...base, method: 'auto', pairs: [], rms: null,
+    auto: { confidence: conf, inlier: best ? best.T.auto.inlier : 0, sheetsHigh: cnt.high, sheetsMid: cnt.mid, sheetsLow: cnt.low, sheetsTotal: sheets.length, prior: prior.title, tiles: got.tiles, failedTiles: got.failed } };
+  post('auto', { id, main, sheets: sheetT, candidates: [] });
 }
-
-function post(type, data, transfer) { self.postMessage({ type, ...data }, transfer || []); }
-
-function transferList(map) { return map.parcels.map(p => p.ring.buffer); }
 
 self.onmessage = async ({ data }) => {
   const { id } = data;
