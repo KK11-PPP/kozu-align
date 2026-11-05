@@ -536,10 +536,16 @@ map.on('click', e => {
 $('mojexport').onclick = () => {
   const features = [];
   let skipped = 0;
-  for (const rec of maps.values()) for (const p of rec.parcels) {
+  for (const rec of maps.values()) {
+   // 任意座標で、手がかり（信頼度 高・中 か目印）の図郭が1枚も無い図面は、位置が当てにならないので出さない
+   if (rec.arbitrary) {
+     const ts = [rec.transforms.all, ...Object.values(rec.transforms.sheets || {})].filter(Boolean);
+     if (!ts.some(t => (t.pairs && t.pairs.length) || (t.method === 'auto' && t.auto && t.auto.confidence !== 'low'))) { skipped += rec.parcels.length; continue; }
+   }
+   for (const p of rec.parcels) {
     const st = placeState(rec, p);
     const ll = ringLatLngs(rec, p);
-    if (st === 'prov' || st === 'none' || st === 'autolow' || !ll) { skipped++; continue; }
+    if (st === 'prov' || st === 'none' || !ll || /^地区外/.test(p.chiban)) { skipped++; continue; }
     const t = rec.arbitrary ? savedTransform(rec, p.sheet) : null;
     const ring = ll.map(([a, b]) => [+b.toFixed(8), +a.toFixed(8)]);
     ring.push(ring[0]);
@@ -548,12 +554,13 @@ $('mojexport').onclick = () => {
       properties: {
         市区町村コード: rec.cityCode, 市区町村名: rec.city, 大字: p.oaza, 丁目: p.chome || undefined, 小字: p.koaza || undefined, 地番: p.chiban,
         図面: rec.name, 図郭: p.sheet || undefined, 座標系: rec.crs,
-        位置: st === 'pub' ? '公共座標' : st === 'auto' ? '推定（自動照合）' : '推定（目印による位置合わせ）', 推定: st !== 'pub',
+        位置: st === 'pub' ? '公共座標' : st === 'auto' || st === 'autolow' ? '推定（自動照合）' : '推定（目印による位置合わせ）', 推定: st !== 'pub',
         目印数: t && t.pairs.length ? t.pairs.length : undefined, 残差m: t && t.rms != null ? +t.rms.toFixed(2) : undefined,
-        自動信頼度: st === 'auto' ? t.auto.confidence : undefined, 一致率: st === 'auto' ? t.auto.inlier : undefined,
+        自動信頼度: st === 'auto' || st === 'autolow' ? t.auto.confidence : undefined, 一致率: st === 'auto' || st === 'autolow' ? t.auto.inlier : undefined,
       },
       geometry: { type: 'Polygon', coordinates: [ring] },
     });
+   }
   }
   if (!features.length) return toast('出力できる筆がありません（仮配置の図面は出力しません）');
   const fc = {
@@ -565,7 +572,7 @@ $('mojexport').onclick = () => {
   const a = document.createElement('a');
   a.href = url; a.download = `${city}_地番_${new Date().toISOString().slice(0, 10)}.geojson`; a.click();
   setTimeout(() => URL.revokeObjectURL(url), 10000);
-  toast(`${fmt(features.length)}筆を出力しました${skipped ? `（仮配置・要確認の${fmt(skipped)}筆は除外）` : ''}`);
+  toast(`${fmt(features.length)}筆を出力しました${skipped ? `（位置の手がかりが無い${fmt(skipped)}筆は除外）` : ''}`);
 };
 
 // ───────────── 自動照合 ─────────────
