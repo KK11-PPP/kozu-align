@@ -98,8 +98,9 @@ async function autoAlign(data, id) {
       // 隣の結果から予想した位置の近くだけ
       const [plat, plon] = arbToLatLng(sh.anchor[0], sh.anchor[1], ref.T);
       lat0 = plat; lon0 = plon;
-      const a0 = ref.T.angle;
-      res = searchAlignment(sh.pts, linesToLocal(got.lines, lat0, lon0), { radius: 220, fftSize: 256, minCell: 4, angles: [-3, -1.5, 0, 1.5, 3].map(d => a0 + d), scales: [ref.T.scale * 0.98, ref.T.scale, ref.T.scale * 1.02] });
+      // 旧公図は北が上（方位不明フラグfalse）なので、角度は±8°・縮尺は±5%に収める（隣から隣へのずれの連鎖を防ぐ）
+      const a0 = Math.max(-6, Math.min(6, ref.T.angle)), s0 = Math.max(0.97, Math.min(1.03, ref.T.scale));
+      res = searchAlignment(sh.pts, linesToLocal(got.lines, lat0, lon0), { radius: 220, fftSize: 256, minCell: 4, angles: [-2, -1, 0, 1, 2].map(d => a0 + d), scales: [s0 * 0.98, s0, s0 * 1.02] });
     } else {
       if (wideTries >= 6 && solved.size === 0) break; // 広く探しても見つからない図面
       wideTries++;
@@ -107,6 +108,7 @@ async function autoAlign(data, id) {
       res = searchAlignment(sh.pts, priorLocal, { radius: R, minCell: 6, angles: [-6, -4, -2, 0, 2, 4, 6], scales: [0.97, 1, 1.03] });
     }
     const b = res.best;
+    if (Math.abs(b.ang) > 8 || Math.abs(b.s - 1) > 0.05) res.confidence = 'low'; // ありえない角度・縮尺は採用しない
     const T = { ...toTransform(b, sh.anchor, lat0, lon0), method: 'auto', pairs: [], rms: null,
       auto: { confidence: res.confidence, inlier: +b.inlier.toFixed(3), contrast: +b.contrast.toFixed(3), ratio: +res.ratio.toFixed(2), rmsInlier: b.rmsInlier != null ? +b.rmsInlier.toFixed(2) : null, sheet: true, local: !!ref } };
     solved.set(sh.no, { T, conf: res.confidence, sheet: sh });
