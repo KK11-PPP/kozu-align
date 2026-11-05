@@ -15,7 +15,9 @@ let pickMode = null;         // 'src' | 'dst'
 let pendingSrc = null;
 let highlighted = null;
 
-const COLORS = { pub: '#2f6fd6', ok: '#14875a', prov: '#e0861a', hi: '#e2342b' };
+const COLORS = { pub: '#2f6fd6', ok: '#14875a', auto: '#0b8a8f', autolow: '#c2410c', prov: '#e0861a', hi: '#e2342b' };
+const PREF = ['', '北海道', '青森県', '岩手県', '宮城県', '秋田県', '山形県', '福島県', '茨城県', '栃木県', '群馬県', '埼玉県', '千葉県', '東京都', '神奈川県', '新潟県', '富山県', '石川県', '福井県', '山梨県', '長野県', '岐阜県', '静岡県', '愛知県', '三重県', '滋賀県', '京都府', '大阪府', '兵庫県', '奈良県', '和歌山県', '鳥取県', '島根県', '岡山県', '広島県', '山口県', '徳島県', '香川県', '愛媛県', '高知県', '福岡県', '佐賀県', '長崎県', '熊本県', '大分県', '宮崎県', '鹿児島県', '沖縄県'];
+const CONF = { high: '高', mid: '中', low: '低（要確認）' };
 
 // ───────────── Worker ─────────────
 const worker = new Worker(new URL('./moj-worker.js', import.meta.url), { type: 'module' });
@@ -76,7 +78,9 @@ function placeState(rec, p) {
   if (!rec.arbitrary) return 'pub';
   const t = transformFor(rec, p);
   if (!t) return 'none';
-  return t.pairs && t.pairs.length ? 'ok' : 'prov';
+  if (t.pairs && t.pairs.length) return 'ok';
+  if (t.method === 'auto') return t.auto && t.auto.confidence === 'low' ? 'autolow' : 'auto';
+  return 'prov';
 }
 function ringLatLngs(rec, p) {
   const out = [], r = p.ring;
@@ -87,8 +91,9 @@ function ringLatLngs(rec, p) {
   return out;
 }
 function styleFor(st) {
-  const c = st === 'pub' ? COLORS.pub : st === 'ok' ? COLORS.ok : COLORS.prov;
-  return { renderer, color: c, weight: st === 'prov' ? 1 : 1.2, opacity: 0.9, fillColor: c, fillOpacity: 0.06, dashArray: st === 'prov' ? '4 3' : null };
+  const c = COLORS[st] || COLORS.prov;
+  const dashed = st === 'prov' || st === 'autolow';
+  return { renderer, color: c, weight: dashed ? 1 : 1.2, opacity: 0.9, fillColor: c, fillOpacity: 0.06, dashArray: dashed ? '4 3' : null };
 }
 
 function render(rec, onlyActiveUnit = false) {
@@ -134,6 +139,7 @@ function placeText(rec, p) {
   if (st === 'pub') return `公共座標（${esc(rec.crs)}）`;
   if (st === 'prov') return '<b style="color:#b06a0c">位置未確定（仮配置）</b>';
   const t = transformFor(rec, p);
+  if (st === 'auto' || st === 'autolow') return `${st === 'autolow' ? '<b style="color:#c2410c">' : ''}自動推定（信頼度：${CONF[t.auto.confidence]}・一致率${Math.round(t.auto.inlier * 100)}%${t.auto.sheet ? '・図郭別に調整' : ''}）${st === 'autolow' ? '</b>' : ''}`;
   return `推定位置（目印${t.pairs.length}点${t.rms != null ? '・誤差 約' + t.rms.toFixed(1) + 'm' : ''}）`;
 }
 function onParcelClick(rec, p, e) {
@@ -275,6 +281,8 @@ function mapSummary(rec) {
   if (!rec.arbitrary) return '<span class="mojbadge pub">公共座標</span>';
   const ts = [rec.transforms.all, ...Object.values(rec.transforms.sheets || {})].filter(Boolean);
   const aligned = ts.filter(t => t.pairs && t.pairs.length);
+  const a = rec.transforms.all;
+  if (!aligned.length && a && a.method === 'auto') return `<span class="mojbadge ${a.auto.confidence === 'low' ? 'arb' : 'ok'}">自動推定・信頼度${CONF[a.auto.confidence]}（一致率${Math.round(a.auto.inlier * 100)}%）</span>`;
   if (!aligned.length) return '<span class="mojbadge arb">任意座標・仮配置</span>';
   return `<span class="mojbadge ok">任意座標・位置合わせ済${Object.keys(rec.transforms.sheets || {}).length ? '（図郭別あり）' : ''}</span>`;
 }
@@ -366,7 +374,7 @@ $('mojsearch').oninput = () => {
     const d = document.createElement('div');
     d.className = 'mojitem';
     d.style.cursor = 'pointer';
-    d.innerHTML = `<b>${esc(p.oaza)} ${esc(p.chiban)}</b><span class="mojbadge ${st === 'pub' ? 'pub' : st === 'ok' ? 'ok' : 'arb'}">${st === 'pub' ? '公共座標' : st === 'ok' ? '推定位置' : '仮配置'}</span><br><span class="muted">${esc(rec.name)}${p.sheet ? '・図郭' + esc(p.sheet) : ''}</span>`;
+    d.innerHTML = `<b>${esc(p.oaza)} ${esc(p.chiban)}</b><span class="mojbadge ${st === 'pub' ? 'pub' : st === 'ok' || st === 'auto' ? 'ok' : 'arb'}">${{ pub: '公共座標', ok: '推定位置', auto: '自動推定', autolow: '自動推定・要確認' }[st] || '仮配置'}</span><br><span class="muted">${esc(rec.name)}${p.sheet ? '・図郭' + esc(p.sheet) : ''}</span>`;
     d.onclick = () => focusParcel(rec, p);
     box.append(d);
   }
@@ -529,7 +537,7 @@ $('mojexport').onclick = () => {
   for (const rec of maps.values()) for (const p of rec.parcels) {
     const st = placeState(rec, p);
     const ll = ringLatLngs(rec, p);
-    if (st === 'prov' || st === 'none' || !ll) { skipped++; continue; }
+    if (st === 'prov' || st === 'none' || st === 'autolow' || !ll) { skipped++; continue; }
     const t = rec.arbitrary ? savedTransform(rec, p.sheet) : null;
     const ring = ll.map(([a, b]) => [+b.toFixed(8), +a.toFixed(8)]);
     ring.push(ring[0]);
@@ -538,8 +546,9 @@ $('mojexport').onclick = () => {
       properties: {
         市区町村コード: rec.cityCode, 市区町村名: rec.city, 大字: p.oaza, 丁目: p.chome || undefined, 小字: p.koaza || undefined, 地番: p.chiban,
         図面: rec.name, 図郭: p.sheet || undefined, 座標系: rec.crs,
-        位置: st === 'pub' ? '公共座標' : '推定（目印による位置合わせ）', 推定: st !== 'pub',
-        目印数: t ? t.pairs.length : undefined, 残差m: t && t.rms != null ? +t.rms.toFixed(2) : undefined,
+        位置: st === 'pub' ? '公共座標' : st === 'auto' ? '推定（自動照合）' : '推定（目印による位置合わせ）', 推定: st !== 'pub',
+        目印数: t && t.pairs.length ? t.pairs.length : undefined, 残差m: t && t.rms != null ? +t.rms.toFixed(2) : undefined,
+        自動信頼度: st === 'auto' ? t.auto.confidence : undefined, 一致率: st === 'auto' ? t.auto.inlier : undefined,
       },
       geometry: { type: 'Polygon', coordinates: [ring] },
     });
@@ -554,8 +563,89 @@ $('mojexport').onclick = () => {
   const a = document.createElement('a');
   a.href = url; a.download = `${city}_地番_${new Date().toISOString().slice(0, 10)}.geojson`; a.click();
   setTimeout(() => URL.revokeObjectURL(url), 10000);
-  toast(`${fmt(features.length)}筆を出力しました${skipped ? `（仮配置の${fmt(skipped)}筆は除外）` : ''}`);
+  toast(`${fmt(features.length)}筆を出力しました${skipped ? `（仮配置・要確認の${fmt(skipped)}筆は除外）` : ''}`);
 };
+
+// ───────────── 自動照合 ─────────────
+function dominantOaza(rec) {
+  const c = new Map();
+  for (const p of rec.parcels) if (p.oaza) c.set(p.oaza, (c.get(p.oaza) || 0) + 1);
+  return [...c.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] || '';
+}
+async function runAuto(rec) {
+  const pref = PREF[parseInt(String(rec.cityCode || '').slice(0, 2), 10)] || '';
+  const oaza = dominantOaza(rec);
+  const query = (pref + (rec.city || '') + oaza.replace(/（.*?）/g, '')).trim();
+  const fb = rec.transforms.all ? rec.transforms.all.center : null;
+  const res = await ask({
+    type: 'auto', query, fallback: fb, radius: 2000,
+    parcels: rec.parcels.map(p => ({ ring: p.ring, chiban: p.chiban, sheet: p.sheet })),
+    bbox: rec.bbox, sheets: rec.sheets.map(s => ({ no: s.no })),
+  });
+  if (active && active.rec === rec) closeAlign();
+  rec.transforms.all = res.main;
+  // 目印で手動調整した図郭は残し、自動の結果は入れ替える
+  const keep = {};
+  for (const [k, t] of Object.entries(rec.transforms.sheets || {})) if (t.pairs && t.pairs.length) keep[k] = t;
+  rec.transforms.sheets = { ...res.sheets, ...keep };
+  render(rec);
+  try { await persist(rec); } catch {}
+  renderMapList();
+  return res;
+}
+function autoSummary(rec, res) {
+  const a = res.main.auto;
+  return `${rec.name}：信頼度${CONF[a.confidence]}・一致率${Math.round(a.inlier * 100)}%・図郭別調整${Object.keys(res.sheets).length}枚`;
+}
+$('mojauto').onclick = async () => {
+  if (!active) return;
+  const rec = active.rec;
+  $('mojauto').disabled = true;
+  try {
+    const res = await runAuto(rec);
+    status(autoSummary(rec, res) + (res.main.auto.confidence === 'low' ? '。合っていない可能性が高いので、目印で直してください。' : '。地図で道路や水路が重なっているか確認してください。'));
+    zoomTo(rec);
+  } catch (e) { status('自動照合できませんでした：' + e.message); }
+  $('mojauto').disabled = false;
+};
+async function autoAll(list) {
+  const out = { high: 0, mid: 0, low: 0, fail: 0 };
+  for (let i = 0; i < list.length; i++) {
+    const rec = list[i];
+    try {
+      status(`自動照合 ${i + 1}/${list.length}：${rec.name}`);
+      const res = await runAuto(rec);
+      out[res.main.auto.confidence]++;
+    } catch (e) { out.fail++; console.warn(rec.name, e); }
+  }
+  status(`自動照合が終わりました（${list.length}図面）：信頼度 高${out.high}・中${out.mid}・低${out.low}${out.fail ? '・失敗' + out.fail : ''}。低の図面は目印で直してください。`);
+  return out;
+}
+$('mojautoall').onclick = async () => {
+  const list = [...maps.values()].filter(r => r.arbitrary);
+  if (!list.length) return toast('任意座標の図面が読み込まれていません');
+  $('mojautoall').disabled = true;
+  await autoAll(list);
+  $('mojautoall').disabled = false;
+};
+$('mojloadall').onclick = async () => {
+  if (!bundle) return;
+  const entries = bundle.list.map(x => x.entry);
+  if (!confirm(`ZIP内の全${entries.length}図面を読み込み、任意座標の図面をすべて自動照合します。時間がかかります（1図面あたり十数秒〜）。続けますか？`)) return;
+  $('mojloadall').disabled = true;
+  const recs = [];
+  for (let i = 0; i < entries.length; i += 8) {
+    status(`図面を読み込み中… ${i}/${entries.length}`);
+    recs.push(...await loadEntries(entries.slice(i, i + 8)));
+  }
+  await autoAll(recs.filter(r => r.arbitrary));
+  $('mojloadall').disabled = false;
+};
+function zoomTo(rec) {
+  const b = L.latLngBounds([]); for (const p of rec.parcels) if (p._ll) b.extend(p._ll[0]);
+  if (b.isValid()) { showMapOnPhone(); map.fitBounds(b, { padding: [30, 30] }); }
+}
+window.__moj = { maps, runAuto, autoAll }; // 動作確認用
 
 // ───────────── 起動時：保存済みの図面を復元 ─────────────
 (async () => {
