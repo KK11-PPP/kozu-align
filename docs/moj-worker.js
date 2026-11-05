@@ -56,7 +56,7 @@ async function findPrior(q) {
 }
 
 async function autoAlign(data, id) {
-  const { parcels, bbox, sheets, query, fallback, radius } = data;
+  const { parcels, bbox, sheets, query, fallback, radius, anchorLines } = data;
   const say = text => post('progress', { id, text });
   let prior = query ? await findPrior(query) : null;
   if (!prior && fallback) prior = { lat: fallback[0], lon: fallback[1], title: '仮配置の位置' };
@@ -70,6 +70,7 @@ async function autoAlign(data, id) {
   say(`「${prior.title}」付近の道路・水路データを取得中…`);
   const got = await fetchLines(prior.lat, prior.lon, Math.max(S, 800) + R + 300, (d, n) => { if (d % 10 === 0 || d === n) say(`道路・水路データを取得中… ${d}/${n}`); });
   if (!got.lines.length) throw new Error('国土地理院のデータを取得できませんでした');
+  if (anchorLines && anchorLines.length) got.lines.push(...anchorLines);
 
   // 図郭ごとに探す。見つかった図郭の隣は、その結果から予想した位置の近くだけを探す（速く・確実に）
   const info = sheets.map(sh => {
@@ -102,7 +103,7 @@ async function autoAlign(data, id) {
       const a0 = Math.max(-6, Math.min(6, ref.T.angle)), s0 = Math.max(0.97, Math.min(1.03, ref.T.scale));
       res = searchAlignment(sh.pts, linesToLocal(got.lines, lat0, lon0), { radius: 220, fftSize: 256, minCell: 4, angles: [-2, -1, 0, 1, 2].map(d => a0 + d), scales: [s0 * 0.98, s0, s0 * 1.02] });
     } else {
-      if (wideTries >= 6 && solved.size === 0) break; // 広く探しても見つからない図面
+      if (wideTries >= 4 && solved.size === 0) break; // 広く探しても見つからない図面
       wideTries++;
       lat0 = prior.lat; lon0 = prior.lon;
       res = searchAlignment(sh.pts, priorLocal, { radius: R, minCell: 6, angles: [-6, -4, -2, 0, 2, 4, 6], scales: [0.97, 1, 1.03] });

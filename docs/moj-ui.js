@@ -226,6 +226,7 @@ async function loadEntries(entries) {
   } catch (err) { status('読み込めませんでした：' + err.message); return []; }
 }
 
+let bulk = false;
 async function addMaps(list, sourceFile) {
   const added = [];
   for (const m of list) {
@@ -238,6 +239,7 @@ async function addMaps(list, sourceFile) {
       bbox: m.bbox, sheets: m.sheets, parcels: m.parcels, importedAt: new Date().toISOString(), visible: true,
       transforms: old ? old.transforms : { all: null, sheets: {} },
     };
+    if (bulk && rec.arbitrary) rec.visible = false; // まとめて処理するときは、照合が終わるまで描かない
     maps.set(key, rec);
     added.push(rec);
   }
@@ -577,8 +579,20 @@ async function runAuto(rec) {
   const oaza = dominantOaza(rec);
   const query = (pref + (rec.city || '') + oaza.replace(/（.*?）/g, '')).trim();
   const fb = rec.transforms.all ? rec.transforms.all.center : null;
+  // 同じ市町村の公共座標の図面（区画整理・地籍調査）の境界線も照合相手にする（位置が正確な手がかり）
+  const anchorLines = [];
+  for (const r of maps.values()) {
+    if (r.arbitrary || r.cityCode !== rec.cityCode) continue;
+    for (const p of r.parcels) {
+      const ll = p._ll || ringLatLngs(r, p);
+      const L = new Float64Array(ll.length * 2 + 2);
+      ll.forEach((q, i) => { L[i * 2] = q[1]; L[i * 2 + 1] = q[0]; });
+      L[ll.length * 2] = ll[0][1]; L[ll.length * 2 + 1] = ll[0][0];
+      anchorLines.push(L);
+    }
+  }
   const res = await ask({
-    type: 'auto', query, fallback: fb, radius: 2600,
+    type: 'auto', query, fallback: fb, radius: 2600, anchorLines,
     parcels: rec.parcels.map(p => ({ ring: p.ring, chiban: p.chiban, sheet: p.sheet })),
     bbox: rec.bbox, sheets: rec.sheets.map(s => ({ no: s.no, corners: s.corners })),
   });
@@ -588,6 +602,7 @@ async function runAuto(rec) {
   const keep = {};
   for (const [k, t] of Object.entries(rec.transforms.sheets || {})) if (t.pairs && t.pairs.length) keep[k] = t;
   rec.transforms.sheets = { ...res.sheets, ...keep };
+  rec.visible = true;
   render(rec);
   try { await persist(rec); } catch {}
   renderMapList();
@@ -633,19 +648,24 @@ $('mojloadall').onclick = async () => {
   const entries = bundle.list.map(x => x.entry);
   if (!confirm(`ZIP内の全${entries.length}図面を読み込み、任意座標の図面をすべて自動照合します。時間がかかります（1図面あたり十数秒〜）。続けますか？`)) return;
   $('mojloadall').disabled = true;
+  await loadAllAndAlign(entries);
+  $('mojloadall').disabled = false;
+};
+async function loadAllAndAlign(entries) {
+  bulk = true;
   const recs = [];
   for (let i = 0; i < entries.length; i += 8) {
     status(`図面を読み込み中… ${i}/${entries.length}`);
     recs.push(...await loadEntries(entries.slice(i, i + 8)));
   }
-  await autoAll(recs.filter(r => r.arbitrary));
-  $('mojloadall').disabled = false;
-};
+  bulk = false;
+  return await autoAll(recs.filter(r => r.arbitrary));
+}
 function zoomTo(rec) {
   const b = L.latLngBounds([]); for (const p of rec.parcels) if (p._ll) b.extend(p._ll[0]);
   if (b.isValid()) { showMapOnPhone(); map.fitBounds(b, { padding: [30, 30] }); }
 }
-window.__moj = { maps, runAuto, autoAll }; // 動作確認用
+window.__moj = { maps, runAuto, autoAll, loadAllAndAlign, get bundle() { return bundle; } }; // 動作確認用
 
 // ───────────── 起動時：保存済みの図面を復元 ─────────────
 (async () => {
