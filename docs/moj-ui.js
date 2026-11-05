@@ -178,6 +178,9 @@ $('mojfile').onchange = async e => {
   const f = e.target.files[0];
   e.target.value = '';
   if (!f) return;
+  await openFile(f);
+};
+async function openFile(f) {
   status(f.name + ' を読み込み中…');
   try {
     const res = await ask({ type: 'open', file: f });
@@ -187,7 +190,28 @@ $('mojfile').onchange = async e => {
     const arb = res.list.filter(x => x.crs === '任意座標系').length;
     status(`${res.file}：図面${res.list.length}件（うち任意座標${arb}件）${res.index ? '・地番' + fmt(res.index.zip.length) + '筆' : ''}。大字か地番で図面を選んで読み込んでください。`);
   } catch (err) { status('読み込めませんでした：' + err.message); }
-};
+}
+
+// ───────────── 複数ZIPの一括照合（タブが再読み込みされても続きから再開） ─────────────
+let bulkRun = false;
+const RUN_KEY = 'moj-bulk-run';
+async function runParts(urls) {
+  try { localStorage.setItem(RUN_KEY, JSON.stringify({ urls, startedAt: new Date().toISOString() })); } catch {}
+  bulkRun = true;
+  for (let i = 0; i < urls.length; i++) {
+    const name = urls[i].split('/').pop();
+    status(`一括照合 ${i + 1}/${urls.length}：${name} を取得中…`);
+    const blob = await (await fetch(urls[i])).blob();
+    await openFile(new File([blob], name, { type: 'application/zip' }));
+    if (!bundle || bundle.file !== name) throw new Error(name + ' を開けませんでした');
+    await loadAllAndAlign(bundle.list.map(x => x.entry));
+  }
+  bulkRun = false;
+  try { localStorage.removeItem(RUN_KEY); } catch {}
+  for (const r of maps.values()) if (r.visible === false && r.transforms.all && r.transforms.all.method === 'auto') { r.visible = true; persist(r).catch(() => {}); }
+  status('一括照合がすべて完了しました（' + new Date().toLocaleString('ja-JP') + '）。');
+  renderMapList();
+}
 
 function setupBundle() {
   $('mojbundle').hidden = false;
@@ -609,7 +633,7 @@ async function runAuto(rec) {
   const keep = {};
   for (const [k, t] of Object.entries(rec.transforms.sheets || {})) if (t.pairs && t.pairs.length) keep[k] = t;
   rec.transforms.sheets = { ...res.sheets, ...keep };
-  rec.visible = true;
+  rec.visible = !bulkRun; // まとめて処理中はメモリ節約のため描かない
   render(rec);
   try { await persist(rec); } catch {}
   renderMapList();
@@ -666,19 +690,21 @@ async function loadAllAndAlign(entries) {
     recs.push(...await loadEntries(entries.slice(i, i + 8)));
   }
   bulk = false;
-  return await autoAll(recs.filter(r => r.arbitrary));
+  return await autoAll(recs.filter(r => r.arbitrary && !(r.transforms.all && r.transforms.all.method === 'auto')));
 }
 function zoomTo(rec) {
   const b = L.latLngBounds([]); for (const p of rec.parcels) if (p._ll) b.extend(p._ll[0]);
   if (b.isValid()) { showMapOnPhone(); map.fitBounds(b, { padding: [30, 30] }); }
 }
-window.__moj = { maps, runAuto, autoAll, loadAllAndAlign, get bundle() { return bundle; } }; // 動作確認用
+window.__moj = { maps, runAuto, autoAll, loadAllAndAlign, runParts, get bulkRun() { return bulkRun; }, get bundle() { return bundle; } }; // 動作確認用
 
 // ───────────── 起動時：保存済みの図面を復元 ─────────────
 (async () => {
   try {
     const rows = await store('readonly', s => s.getAll());
+    let resuming = false; try { resuming = !!localStorage.getItem(RUN_KEY); } catch {}
     for (const r of rows || []) {
+      if (resuming && r.arbitrary) r.visible = false;
       r.transforms = r.transforms || { all: null, sheets: {} };
       r.transforms.sheets = r.transforms.sheets || {};
       maps.set(r.key, r);
@@ -686,4 +712,8 @@ window.__moj = { maps, runAuto, autoAll, loadAllAndAlign, get bundle() { return 
     }
     renderMapList();
   } catch { /* 保存機能が使えない環境 */ }
+  try {
+    const run = JSON.parse(localStorage.getItem(RUN_KEY) || 'null');
+    if (run && run.urls) { status('中断していた一括照合を再開します…'); setTimeout(() => runParts(run.urls).catch(e => status('一括照合が止まりました：' + e.message)), 1500); }
+  } catch {}
 })();
