@@ -129,6 +129,10 @@ async function autoAlign(data, id) {
   post('auto', { id, main, sheets: sheetT, candidates: [] });
 }
 
+function post(type, data, transfer) { self.postMessage({ type, ...data }, transfer || []); }
+
+function transferList(map) { return map.parcels.map(p => p.ring.buffer); }
+
 self.onmessage = async ({ data }) => {
   const { id } = data;
   try {
