@@ -74,7 +74,7 @@ async function autoAlign(data, id) {
   const res = searchAlignment(pts, local, { radius: R, progress: f => say(`位置を探索中… ${Math.round(f * 100)}%`) });
   const b = res.best;
   const main = { ...toTransform(b, anchor, prior.lat, prior.lon), method: 'auto', pairs: [], rms: null,
-    auto: { confidence: res.confidence, inlier: +b.inlier.toFixed(3), ratio: +res.ratio.toFixed(2), rmsInlier: b.rmsInlier != null ? +b.rmsInlier.toFixed(2) : null, prior: prior.title, tiles: got.tiles, failedTiles: got.failed, lastErr: got.lastErr || undefined, lines: got.lines.length } };
+    auto: { confidence: res.confidence, inlier: +b.inlier.toFixed(3), ratio: +res.ratio.toFixed(2), contrast: +b.contrast.toFixed(3), rmsInlier: b.rmsInlier != null ? +b.rmsInlier.toFixed(2) : null, prior: prior.title, tiles: got.tiles, failedTiles: got.failed, lastErr: got.lastErr || undefined, lines: got.lines.length } };
   // 図郭ごとの微調整
   const sheetT = {};
   if (res.confidence !== 'low') {

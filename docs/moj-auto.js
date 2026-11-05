@@ -316,6 +316,9 @@ export function searchAlignment(srcPts, lines, opt = {}) {
   const dt = distanceTransform(g, N, N);
   const Wre = new Float64Array(N * N), Wim = new Float64Array(N * N);
   for (let i = 0; i < N * N; i++) { const d = dt[i] * cell; Wre[i] = d < tau ? 1 - d / tau : 0; }
+  // 線が密集した場所（市街地など）ほど偶然の一致が増えるので、周囲の平均を引いて割り引く
+  const blur = boxBlur(Wre, N, Math.max(2, Math.round((opt.densityRadius ?? 150) / cell)));
+  for (let i = 0; i < N * N; i++) Wre[i] -= blur[i];
   fft2(Wre, Wim, N, false);
 
   const coarse = thin(srcPts, 60000);
@@ -370,12 +373,50 @@ export function searchAlignment(srcPts, lines, opt = {}) {
     const r = refine(fine, fpts, { tx: c.tx, ty: c.ty, ang: c.ang, s: c.s }, { taus: [10, 5], step0: cell, angStep0: 0.5, sStep0: 0.01, minStep: 0.25 });
     return { ...r, coarse: c.v, ...fine.stats(fpts, r, 3) };
   });
-  refined.sort((a, b) => b.score - a.score);
+  // コントラスト：その位置から60m・120mずらしたときの点数の平均との差。正しい位置ほど大きい
+  for (const r of refined) r.contrast = contrast(fine, fpts, r);
+  refined.sort((a, b) => b.contrast - a.contrast);
   const best = refined[0];
   const second = refined.find(r => Math.hypot(r.tx - best.tx, r.ty - best.ty) > 50);
-  const ratio = second ? best.score / Math.max(second.score, 1e-6) : 9;
-  const confidence = best.inlier >= 0.45 && ratio >= 1.25 ? 'high' : best.inlier >= 0.3 && ratio >= 1.1 ? 'mid' : 'low';
+  const ratio = second ? best.contrast / Math.max(second.contrast, 1e-3) : 9;
+  const confidence = best.contrast >= 0.12 && ratio >= 1.5 ? 'high' : best.contrast >= 0.07 && ratio >= 1.2 ? 'mid' : 'low';
   return { best, candidates: refined, ratio, confidence, cell, fine, fpts };
+}
+
+function contrast(fine, pts, prm, tau = 5) {
+  const base = fine.score(pts, prm, tau);
+  let sum = 0, n = 0;
+  for (const d of [60, 120]) for (let k = 0; k < 8; k++) {
+    const a = k * Math.PI / 4;
+    sum += fine.score(pts, { ...prm, tx: prm.tx + Math.cos(a) * d, ty: prm.ty + Math.sin(a) * d }, tau); n++;
+  }
+  return base - sum / n;
+}
+
+function boxBlur(src, n, r) {
+  // 正方格子 n×n の箱型平均（半径 r セル）。端は内側だけで平均
+  const tmp = new Float64Array(n * n), out = new Float64Array(n * n);
+  for (let y = 0; y < n; y++) {
+    let acc = 0; const o = y * n;
+    for (let x = -r; x <= r; x++) if (x >= 0 && x < n) acc += src[o + x];
+    for (let x = 0; x < n; x++) {
+      const lo = Math.max(0, x - r), hi = Math.min(n - 1, x + r);
+      tmp[o + x] = acc / (hi - lo + 1);
+      if (x - r >= 0) acc -= src[o + x - r];
+      if (x + r + 1 < n) acc += src[o + x + r + 1];
+    }
+  }
+  for (let x = 0; x < n; x++) {
+    let acc = 0;
+    for (let y = -r; y <= r; y++) if (y >= 0 && y < n) acc += tmp[y * n + x];
+    for (let y = 0; y < n; y++) {
+      const lo = Math.max(0, y - r), hi = Math.min(n - 1, y + r);
+      out[y * n + x] = acc / (hi - lo + 1);
+      if (y - r >= 0) acc -= tmp[(y - r) * n + x];
+      if (y + r + 1 < n) acc += tmp[(y + r + 1) * n + x];
+    }
+  }
+  return out;
 }
 
 // 図郭ごとの微調整（全体の結果から小さく動かす）
