@@ -26,23 +26,23 @@ async function fetchLines(lat0, lon0, half, onProg) {
   const tr = tileRange(lat0, lon0, half, TZ);
   const jobs = [];
   for (let x = tr.x0; x <= tr.x1; x++) for (let y = tr.y0; y <= tr.y1; y++) jobs.push([x, y]);
-  const lines = []; let done = 0, failed = 0;
+  const lines = []; let done = 0, failed = 0, lastErr = '';
   async function one([x, y]) {
-    const k = `${TILESET}/${TZ}/${x}/${y}`;
+    const k = `v2/${TILESET}/${TZ}/${x}/${y}`;
     let v = await cacheGet(k);
     if (!v) {
       try {
         const r = await fetch(`https://cyberjapandata.gsi.go.jp/xyz/${TILESET}/${TZ}/${x}/${y}.pbf`);
         v = r.status === 404 ? [] : r.ok ? decodeMvt(await r.arrayBuffer(), TZ, x, y) : null;
-        if (v) await cachePut(k, v); else failed++;
-      } catch { failed++; v = null; }
+        if (v) await cachePut(k, v); else { failed++; lastErr = 'HTTP ' + r.status; }
+      } catch (e) { failed++; v = null; lastErr = String(e && e.message || e); }
     }
     if (v) lines.push(...v);
     onProg(++done, jobs.length);
   }
   const queue = jobs.slice();
   await Promise.all(Array.from({ length: 6 }, async () => { while (queue.length) await one(queue.shift()); }));
-  return { lines, tiles: jobs.length, failed };
+  return { lines, tiles: jobs.length, failed, lastErr };
 }
 
 async function findPrior(q) {
@@ -74,7 +74,7 @@ async function autoAlign(data, id) {
   const res = searchAlignment(pts, local, { radius: R, progress: f => say(`位置を探索中… ${Math.round(f * 100)}%`) });
   const b = res.best;
   const main = { ...toTransform(b, anchor, prior.lat, prior.lon), method: 'auto', pairs: [], rms: null,
-    auto: { confidence: res.confidence, inlier: +b.inlier.toFixed(3), ratio: +res.ratio.toFixed(2), rmsInlier: b.rmsInlier != null ? +b.rmsInlier.toFixed(2) : null, prior: prior.title, failedTiles: got.failed } };
+    auto: { confidence: res.confidence, inlier: +b.inlier.toFixed(3), ratio: +res.ratio.toFixed(2), rmsInlier: b.rmsInlier != null ? +b.rmsInlier.toFixed(2) : null, prior: prior.title, tiles: got.tiles, failedTiles: got.failed, lastErr: got.lastErr || undefined, lines: got.lines.length } };
   // 図郭ごとの微調整
   const sheetT = {};
   if (res.confidence !== 'low') {

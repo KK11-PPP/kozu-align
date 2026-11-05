@@ -80,7 +80,8 @@ export function decodeMvt(buf, z, x, y) {
   const lines = [];
   const p = { i: 0 };
   const varint = (bb, q) => { let r = 0, s = 0, c; do { c = bb[q.i++]; r += (c & 127) * 2 ** s; s += 7; } while (c & 128); return r; };
-  const skip = (bb, q, w) => { if (w === 0) varint(bb, q); else if (w === 1) q.i += 8; else if (w === 2) q.i += varint(bb, q); else if (w === 5) q.i += 4; };
+  // 注意：q.i += varint(bb, q) と書くと、長さのバイト分を進めた結果が上書きされて位置がずれる
+  const skip = (bb, q, w) => { if (w === 0) varint(bb, q); else if (w === 1) q.i += 8; else if (w === 2) { const l = varint(bb, q); q.i += l; } else if (w === 5) q.i += 4; };
   const n2 = 2 ** z;
   while (p.i < b.length) {
     const key = varint(b, p), f = key >> 3, w = key & 7;
