@@ -370,7 +370,10 @@ export function searchAlignment(srcPts, lines, opt = {}) {
   const fine = new FineGrid(lines, 0, 0, Math.min(half, S + R + 100), fineCell);
   const fpts = thin(srcPts, 25000);
   const refined = cands.map(c => {
-    const r = refine(fine, fpts, { tx: c.tx, ty: c.ty, ang: c.ang, s: c.s }, { taus: [10, 5], step0: cell, angStep0: 0.5, sStep0: 0.01, minStep: 0.25 });
+    // boundRefine：粗探索の値の近くだけで詰める（縮めて線の密集地に寄せると点数が上がり、縮尺0.2〜0.6などに暴走するため）
+    const B = opt.boundRefine;
+    const limits = B ? { t: [c.tx, c.ty], tMax: B.t ?? 40, ang: [c.ang, B.ang ?? 3], s: [c.s, B.s ?? 0.04] } : undefined;
+    const r = refine(fine, fpts, { tx: c.tx, ty: c.ty, ang: c.ang, s: c.s }, { taus: [10, 5], step0: cell, angStep0: 0.5, sStep0: 0.01, minStep: 0.25, limits });
     return { ...r, coarse: c.v, ...fine.stats(fpts, r, 3) };
   });
   // コントラスト：その位置から60m・120mずらしたときの点数の平均との差。正しい位置ほど大きい

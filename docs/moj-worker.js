@@ -2,7 +2,7 @@
 import { arbToLatLng, planeToLatLng } from './moj.js';
 import { listZip, extractZip, decodeText, innerXml, innerHead, headInfo, parseSearchList, parseMojXml } from './moj.js';
 
-import { featureEdges, edgePoints, decodeMvt, tileRange, searchAlignment, refineSheet, toTransform, linesToLocal } from './moj-auto.js';
+import { featureEdges, edgePoints, decodeMvt, tileRange, searchAlignment, refineSheet, toTransform, linesToLocal } from './moj-auto.js?v=2'; // 更新直後に古い版がキャッシュから読まれないように
 
 let bundle = null; // { buf, entries, name }
 const batchAnchors = []; // 一括照合で使う公共座標の筆の線
@@ -56,8 +56,16 @@ async function findPrior(q) {
   return null;
 }
 
+// 探索範囲の設定。'wide' は一括照合（batch.html）用：2026-11-06 の吉見町の結果で、角度が −6〜−10°、縮尺が 1.02〜1.05 に偏り、
+// 正解が従来の範囲の端・外にある図郭が多かったため（磁北で描かれた旧公図の回転、縄伸び）。
+const SEARCH = {
+  default: { angles: [-6, -4, -2, 0, 2, 4, 6], scales: [0.97, 1, 1.03], clampA: [-6, 6], clampS: [0.97, 1.03], okA: [-8, 8], okS: [0.95, 1.05] },
+  wide: { angles: [-12, -10, -8, -6, -4, -2, 0, 2, 4], scales: [0.97, 1, 1.03, 1.06], clampA: [-12, 6], clampS: [0.95, 1.08], okA: [-14, 8], okS: [0.93, 1.10], boundRefine: { t: 40, ang: 3, s: 0.04 } },
+};
+
 async function autoAlign(data, id) {
   const { parcels, bbox, sheets, query, fallback, radius, anchorLines } = data;
+  const P = SEARCH[data.profile] || SEARCH.default;
   const say = text => post('progress', { id, text });
   let prior = query ? await findPrior(query) : null;
   if (!prior && fallback) prior = { lat: fallback[0], lon: fallback[1], title: '仮配置の位置' };
@@ -100,17 +108,17 @@ async function autoAlign(data, id) {
       // 隣の結果から予想した位置の近くだけ
       const [plat, plon] = arbToLatLng(sh.anchor[0], sh.anchor[1], ref.T);
       lat0 = plat; lon0 = plon;
-      // 旧公図は北が上（方位不明フラグfalse）なので、角度は±8°・縮尺は±5%に収める（隣から隣へのずれの連鎖を防ぐ）
-      const a0 = Math.max(-6, Math.min(6, ref.T.angle)), s0 = Math.max(0.97, Math.min(1.03, ref.T.scale));
-      res = searchAlignment(sh.pts, linesToLocal(got.lines, lat0, lon0), { radius: 220, fftSize: 256, minCell: 4, angles: [-2, -1, 0, 1, 2].map(d => a0 + d), scales: [s0 * 0.98, s0, s0 * 1.02] });
+      // 旧公図はおおむね北が上なので、角度・縮尺は設定（SEARCH）の範囲に収める（隣から隣へのずれの連鎖を防ぐ）
+      const a0 = Math.max(P.clampA[0], Math.min(P.clampA[1], ref.T.angle)), s0 = Math.max(P.clampS[0], Math.min(P.clampS[1], ref.T.scale));
+      res = searchAlignment(sh.pts, linesToLocal(got.lines, lat0, lon0), { radius: 220, fftSize: 256, minCell: 4, angles: [-2, -1, 0, 1, 2].map(d => a0 + d), scales: [s0 * 0.98, s0, s0 * 1.02], boundRefine: P.boundRefine });
     } else {
       if (wideTries >= 4 && solved.size === 0) break; // 広く探しても見つからない図面
       wideTries++;
       lat0 = prior.lat; lon0 = prior.lon;
-      res = searchAlignment(sh.pts, priorLocal, { radius: R, minCell: 6, angles: [-6, -4, -2, 0, 2, 4, 6], scales: [0.97, 1, 1.03] });
+      res = searchAlignment(sh.pts, priorLocal, { radius: R, minCell: 6, angles: P.angles, scales: P.scales, boundRefine: P.boundRefine });
     }
     const b = res.best;
-    if (Math.abs(b.ang) > 8 || Math.abs(b.s - 1) > 0.05) res.confidence = 'low'; // ありえない角度・縮尺は採用しない
+    if (b.ang < P.okA[0] || b.ang > P.okA[1] || b.s < P.okS[0] || b.s > P.okS[1]) res.confidence = 'low'; // ありえない角度・縮尺は採用しない
     const T = { ...toTransform(b, sh.anchor, lat0, lon0), method: 'auto', pairs: [], rms: null,
       auto: { confidence: res.confidence, inlier: +b.inlier.toFixed(3), contrast: +b.contrast.toFixed(3), ratio: +res.ratio.toFixed(2), rmsInlier: b.rmsInlier != null ? +b.rmsInlier.toFixed(2) : null, sheet: true, local: !!ref } };
     solved.set(sh.no, { T, conf: res.confidence, sheet: sh });
@@ -129,7 +137,7 @@ async function autoAlign(data, id) {
   const conf = !best ? 'low' : cnt.high >= Math.max(2, info.length * 0.4) ? 'high' : cnt.high + cnt.mid >= Math.max(2, info.length * 0.3) ? 'mid' : 'low';
   const base = best ? best.T : { center: [prior.lat, prior.lon], angle: 0, scale: 1, anchor: mapAnchor };
   const main = { ...base, method: 'auto', pairs: [], rms: null,
-    auto: { confidence: conf, inlier: best ? best.T.auto.inlier : 0, sheetsHigh: cnt.high, sheetsMid: cnt.mid, sheetsLow: cnt.low, sheetsTotal: sheets.length, prior: prior.title, tiles: got.tiles, failedTiles: got.failed } };
+    auto: { confidence: conf, profile: data.profile || 'default', inlier: best ? best.T.auto.inlier : 0, sheetsHigh: cnt.high, sheetsMid: cnt.mid, sheetsLow: cnt.low, sheetsTotal: sheets.length, prior: prior.title, tiles: got.tiles, failedTiles: got.failed } };
   post('auto', { id, main, sheets: sheetT, candidates: [], name: data.name, nParcels: data.nParcels });
 }
 
@@ -205,7 +213,7 @@ self.onmessage = async ({ data }) => {
       const cnt = new Map(); for (const p of map.parcels) if (p.oaza) cnt.set(p.oaza, (cnt.get(p.oaza) || 0) + 1);
       const oaza = [...cnt.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] || '';
       const query = (data.pref || '') + (map.city || '') + oaza.replace(/（.*?）/g, '');
-      return await autoAlign({ parcels: map.parcels, bbox: map.bbox, sheets: map.sheets, query, radius: 2600, anchorLines: batchAnchors, name: map.name, nParcels: map.parcels.length }, id);
+      return await autoAlign({ parcels: map.parcels, bbox: map.bbox, sheets: map.sheets, query, radius: 2600, anchorLines: batchAnchors, name: map.name, nParcels: map.parcels.length, profile: data.profile }, id);
     }
     if (data.type === 'load') {
       if (!bundle) throw new Error('先にZIPを選び直してください');
