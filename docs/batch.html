@@ -41,7 +41,7 @@ let st; try { st = JSON.parse(localStorage.getItem(KEY) || 'null'); } catch { st
 if (!st) st = { done: {}, failed: {}, startedAt: new Date().toISOString(), finishedAt: null };
 const save = () => { try { localStorage.setItem(KEY, JSON.stringify(st)); } catch (e) { log('保存できませんでした：' + e.message); } };
 const log = t => { $('log').textContent = `${new Date().toLocaleTimeString('ja-JP')} ${t}\n` + $('log').textContent; };
-const worker = new Worker(new URL('./moj-worker.js', import.meta.url), { type: 'module' });
+const worker = new Worker(new URL('./moj-worker.js?v=batch1', import.meta.url), { type: 'module' });
 let seq = 0; const wait = new Map();
 worker.onmessage = ({ data }) => {
   const w = wait.get(data.id); if (!w) return;
