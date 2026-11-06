@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>吉見町 一括自動照合 | FIELD ALIGN</title>
+<style>
+body{font-family:system-ui,-apple-system,"Hiragino Sans","Yu Gothic UI",sans-serif;margin:0;background:#f4f7f5;color:#18322a}
+main{max-width:760px;margin:0 auto;padding:24px 18px}
+h1{font-size:20px;margin:0 0 6px}
+p{line-height:1.7;font-size:14px}
+.card{background:#fff;border:1px solid #d9e4dd;border-radius:12px;padding:16px;margin:14px 0}
+#status{font-size:15px;font-weight:600}
+.bar{height:10px;background:#e3ece6;border-radius:6px;overflow:hidden;margin:10px 0}
+.bar div{height:100%;width:0;background:#187b60;transition:width .3s}
+button{font:inherit;padding:10px 14px;border-radius:8px;border:1px solid #187b60;background:#187b60;color:#fff;cursor:pointer}
+button.sub{background:#fff;color:#187b60}
+#log{font-size:12px;max-height:340px;overflow:auto;white-space:pre-wrap;color:#33544a}
+.muted{color:#6a837a;font-size:12px}
+</style>
+</head>
+<body>
+<main>
+<h1>吉見町 一括自動照合</h1>
+<p>吉見町の任意座標の図面（124件）を、国土地理院の道路・水路データと照合して、図郭ごとの推定位置を求めます。画面には地図を描かず、結果の数値だけを保存するので、PCへの負担は小さめです。</p>
+<div class="card">
+  <div id="status">準備中…</div>
+  <div class="bar"><div id="bar"></div></div>
+  <div class="muted" id="sub"></div>
+  <p class="muted">このタブを開いたままにしてください。途中で閉じても、開き直せば続きから再開します。終わると結果ファイル（yoshimi_transforms.json）が自動でダウンロードされます。</p>
+  <button id="dl" class="sub" disabled>結果をダウンロード</button>
+  <button id="reset" class="sub">最初からやり直す</button>
+</div>
+<div class="card"><div id="log"></div></div>
+</main>
+<script type="module">
+const PARTS = [1, 2, 3, 4, 5, 6, 7].map(n => `data/yoshimi_part0${n}.zip`);
+const KEY = 'yoshimi-batch-v1';
+const $ = id => document.getElementById(id);
+let st; try { st = JSON.parse(localStorage.getItem(KEY) || 'null'); } catch { st = null; }
+if (!st) st = { done: {}, failed: {}, startedAt: new Date().toISOString(), finishedAt: null };
+const save = () => { try { localStorage.setItem(KEY, JSON.stringify(st)); } catch (e) { log('保存できませんでした：' + e.message); } };
+const log = t => { $('log').textContent = `${new Date().toLocaleTimeString('ja-JP')} ${t}\n` + $('log').textContent; };
+const worker = new Worker(new URL('./moj-worker.js', import.meta.url), { type: 'module' });
+let seq = 0; const wait = new Map();
+worker.onmessage = ({ data }) => {
+  const w = wait.get(data.id); if (!w) return;
+  if (data.type === 'progress') { $('sub').textContent = data.text; return; }
+  wait.delete(data.id); data.type === 'error' ? w.reject(new Error(data.message)) : w.resolve(data);
+};
+const ask = m => new Promise((res, rej) => { const id = ++seq; wait.set(id, { resolve: res, reject: rej }); worker.postMessage({ ...m, id }); });
+
+function download() {
+  const blob = new Blob([JSON.stringify({ schema: 'moj-transforms/v1', city: '比企郡吉見町', cityCode: '11347', ...st })], { type: 'application/json' });
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'yoshimi_transforms.json'; a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+}
+$('dl').onclick = download;
+$('reset').onclick = () => { if (confirm('保存した照合結果を消して、最初からやり直しますか？')) { localStorage.removeItem(KEY); location.reload(); } };
+
+async function run() {
+  const total = 124;
+  for (const part of PARTS) {
+    $('status').textContent = `${part.split('/').pop()} を読み込み中…`;
+    const { list } = await ask({ type: 'batchOpen', url: part });
+    // 公共座標の図面を先に（照合の手がかりになる）
+    list.sort((a, b) => (a.crs === '任意座標系') - (b.crs === '任意座標系'));
+    for (const it of list) {
+      if (it.crs === '任意座標系' && (st.done[it.entry] || st.failed[it.entry])) continue;
+      const n = Object.keys(st.done).length + Object.keys(st.failed).length;
+      $('bar').style.width = (n / total * 100).toFixed(1) + '%';
+      $('status').textContent = `照合中 ${n}/${total}：${it.name || it.entry}`;
+      try {
+        const r = await ask({ type: 'batchAuto', entry: it.entry, pref: '埼玉県' });
+        if (r.type === 'batchPublic') { log(`公共座標 ${r.name}（${r.parcels}筆）を手がかりに追加`); continue; }
+        const a = r.main.auto;
+        st.done[it.entry] = { name: r.name, parcels: r.nParcels, all: r.main, sheets: r.sheets };
+        log(`${r.name}（${r.nParcels}筆）：図郭 高${a.sheetsHigh}・中${a.sheetsMid}・低${a.sheetsLow}`);
+      } catch (e) {
+        st.failed[it.entry] = { name: it.name, error: e.message };
+        log(`${it.name || it.entry}：照合できず（${e.message}）`);
+      }
+      save();
+    }
+  }
+  st.finishedAt = new Date().toISOString(); save();
+  $('bar').style.width = '100%';
+  const vals = Object.values(st.done);
+  const sum = k => vals.reduce((s, v) => s + (v.all.auto[k] || 0), 0);
+  $('status').textContent = `完了：${vals.length}図面（失敗${Object.keys(st.failed).length}）・図郭 高${sum('sheetsHigh')}・中${sum('sheetsMid')}・低${sum('sheetsLow')}`;
+  document.title = '完了 | 吉見町 一括自動照合';
+  $('dl').disabled = false;
+  download();
+}
+$('dl').disabled = !st.finishedAt;
+if (st.finishedAt) {
+  const vals = Object.values(st.done);
+  $('status').textContent = `完了済み：${vals.length}図面（${new Date(st.finishedAt).toLocaleString('ja-JP')}）`;
+  $('bar').style.width = '100%';
+} else {
+  log(`開始（照合済み ${Object.keys(st.done).length}図面）`);
+  run().catch(e => { $('status').textContent = '止まりました：' + e.message + '（ページを開き直すと続きから再開します）'; log('エラー：' + e.message); });
+}
+window.__batch = { get state() { return st; }, download };
+</script>
+</body>
+</html>

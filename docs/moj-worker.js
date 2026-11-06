@@ -1,10 +1,11 @@
 // 地図XMLの読み込みを画面の裏側で行うWorker。
-import { arbToLatLng } from './moj.js';
+import { arbToLatLng, planeToLatLng } from './moj.js';
 import { listZip, extractZip, decodeText, innerXml, innerHead, headInfo, parseSearchList, parseMojXml } from './moj.js';
 
 import { featureEdges, edgePoints, decodeMvt, tileRange, searchAlignment, refineSheet, toTransform, linesToLocal } from './moj-auto.js';
 
 let bundle = null; // { buf, entries, name }
+const batchAnchors = []; // 一括照合で使う公共座標の筆の線
 
 // ───── 国土地理院ベクトルタイルの取得（端末内にキャッシュ） ─────
 const TILESET = 'optimal_bvmap-v1', TZ = 16;
@@ -70,7 +71,7 @@ async function autoAlign(data, id) {
   say(`「${prior.title}」付近の道路・水路データを取得中…`);
   const got = await fetchLines(prior.lat, prior.lon, Math.max(S, 800) + R + 300, (d, n) => { if (d % 10 === 0 || d === n) say(`道路・水路データを取得中… ${d}/${n}`); });
   if (!got.lines.length) throw new Error('国土地理院のデータを取得できませんでした');
-  if (anchorLines && anchorLines.length) got.lines.push(...anchorLines);
+  if (anchorLines && anchorLines.length) for (const L of anchorLines) got.lines.push(L);
 
   // 図郭ごとに探す。見つかった図郭の隣は、その結果から予想した位置の近くだけを探す（速く・確実に）
   const info = sheets.map(sh => {
@@ -129,7 +130,7 @@ async function autoAlign(data, id) {
   const base = best ? best.T : { center: [prior.lat, prior.lon], angle: 0, scale: 1, anchor: mapAnchor };
   const main = { ...base, method: 'auto', pairs: [], rms: null,
     auto: { confidence: conf, inlier: best ? best.T.auto.inlier : 0, sheetsHigh: cnt.high, sheetsMid: cnt.mid, sheetsLow: cnt.low, sheetsTotal: sheets.length, prior: prior.title, tiles: got.tiles, failedTiles: got.failed } };
-  post('auto', { id, main, sheets: sheetT, candidates: [] });
+  post('auto', { id, main, sheets: sheetT, candidates: [], name: data.name, nParcels: data.nParcels });
 }
 
 function post(type, data, transfer) { self.postMessage({ type, ...data }, transfer || []); }
@@ -180,6 +181,32 @@ self.onmessage = async ({ data }) => {
       return post('bundle', { id, file: file.name, list, index });
     }
     if (data.type === 'auto') return await autoAlign(data, id);
+    // ───── 一括照合（batch.html 用）：図面データはWorkerの中だけで扱い、結果の数値だけ返す ─────
+    if (data.type === 'batchOpen') {
+      const buf = await (await fetch(data.url)).arrayBuffer();
+      const entries = listZip(buf);
+      bundle = { buf, entries, name: data.url.split('/').pop() };
+      const list = [];
+      for (const e of entries.filter(e => /\.zip$/i.test(e.name))) list.push({ entry: e.name, ...headInfo(await innerHead(buf, e)) });
+      return post('batchList', { id, list });
+    }
+    if (data.type === 'batchAuto') {
+      const e = bundle.entries.find(x => x.name === data.entry);
+      const map = parseMojXml(await innerXml(bundle.buf, e), data.entry);
+      if (!map.arbitrary) {
+        for (const p of map.parcels) {
+          const n = p.ring.length / 2, L = new Float64Array(n * 2 + 2);
+          for (let i = 0; i < n; i++) { const q = planeToLatLng(p.ring[i * 2], p.ring[i * 2 + 1], map.zone); L[i * 2] = q[1]; L[i * 2 + 1] = q[0]; }
+          L[n * 2] = L[0]; L[n * 2 + 1] = L[1];
+          batchAnchors.push(L);
+        }
+        return post('batchPublic', { id, name: map.name, parcels: map.parcels.length });
+      }
+      const cnt = new Map(); for (const p of map.parcels) if (p.oaza) cnt.set(p.oaza, (cnt.get(p.oaza) || 0) + 1);
+      const oaza = [...cnt.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] || '';
+      const query = (data.pref || '') + (map.city || '') + oaza.replace(/（.*?）/g, '');
+      return await autoAlign({ parcels: map.parcels, bbox: map.bbox, sheets: map.sheets, query, radius: 2600, anchorLines: batchAnchors, name: map.name, nParcels: map.parcels.length }, id);
+    }
     if (data.type === 'load') {
       if (!bundle) throw new Error('先にZIPを選び直してください');
       const maps = [];
